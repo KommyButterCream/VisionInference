@@ -1,0 +1,52 @@
+# Visual Studio local settings and caches
+.vs/
+*.user
+*.suo
+*.VC.db
+*.VC.opendb
+
+# Build output directories at any depth
+[Bb]uild/
+[Dd]ebug/
+[Rr]elease/
+[Dd]ebugPublic/
+[Rr]elWithDebInfo/
+[Mm]inSizeRel/
+x64/
+x86/
+ARM/
+ARM64/
+
+# Compiler and linker outputs
+*.obj
+*.pch
+*.pdb
+*.idb
+*.ilk
+*.ipch
+*.exp
+*.tlog
+*.lastbuildstate
+*.obj.dt.*
+*.dll
+*.lib
+*.exe
+
+# Python conversion/reference tooling (planned)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Local model artifacts and inspection data
+/models/
+/data/
+*.onnx
+*.engine
+*.plan
+*.pt
+*.pth
+
+# Local documentation (existing policy)
+/docs/
