@@ -50,3 +50,7 @@ venv/
 
 # Local documentation (existing policy)
 /docs/
+
+# Local test project
+/VisionInferenceTest/
+/VisionInference.local.sln

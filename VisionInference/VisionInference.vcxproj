@@ -78,9 +78,11 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="InferenceInstance.cpp" />
     <ClCompile Include="VisionInference.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="InferenceInstance.h" />
     <ClInclude Include="VisionInference.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
