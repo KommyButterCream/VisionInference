@@ -83,9 +83,26 @@ void VI_CALL VI_CloseModel(VI_Handle handle) noexcept
 	handle->instance.Close();
 }
 
-VI_Status VI_CALL VI_InferClassification(VI_Handle handle) noexcept
+VI_Status VI_CALL VI_InferClassification(VI_Handle handle, const VI_ImageView* image) noexcept
 {
-	if (handle == nullptr)
+	if (handle == nullptr || image == nullptr)
+	{
+		return VI_STATUS_INVALID_ARGUMENT;
+	}
+
+	if (image->data == nullptr || image->width <= 0 || image->height <= 0)
+	{
+		return VI_STATUS_INVALID_ARGUMENT;
+	}
+
+	if (image->pixelFormat != VI_PIXEL_FORMAT_BGR8)
+	{
+		return VI_STATUS_INVALID_ARGUMENT;
+	}
+
+	// BGR8은 한 픽셀에 3바이트가 필요하다.
+	// 나눗셈으로 비교하여 width * 3의 오버플로를 피한다.
+	if (image->strideBytes / 3 < static_cast<size_t>(image->width))
 	{
 		return VI_STATUS_INVALID_ARGUMENT;
 	}
@@ -95,5 +112,5 @@ VI_Status VI_CALL VI_InferClassification(VI_Handle handle) noexcept
 		return VI_STATUS_MODEL_NOT_OPEN;
 	}
 
-	return handle->instance.Infer() ? VI_STATUS_OK : VI_STATUS_INFERENCE_FAILED;
+	return handle->instance.Infer(*image) ? VI_STATUS_OK : VI_STATUS_INFERENCE_FAILED;
 }

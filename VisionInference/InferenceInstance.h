@@ -10,6 +10,8 @@
 #include <cstddef> // for std::size_t
 #include <vector> // for std::vector
 
+#include "VisionInference.h" // for VI_ImageView
+
 // TensorRT가 전달하는 오류, 경고 메시지를 처리하기 위한 로거 클래스
 class TensorRTLogger final : public nvinfer1::ILogger
 {
@@ -44,7 +46,7 @@ public:
 	void Close() noexcept;
 	bool IsOpen() const noexcept;
 
-	bool Infer() noexcept;
+	bool Infer(const VI_ImageView& image) noexcept;
 
 private:
 	void PrintModelInfo() const noexcept;
@@ -56,6 +58,7 @@ private:
 
 	bool PrepareExecution() noexcept;
 
+	bool Preprocess(const VI_ImageView& image) noexcept;
 	bool RunTensor() noexcept;
 
 private:

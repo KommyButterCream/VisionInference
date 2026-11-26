@@ -1,6 +1,10 @@
 #include "InferenceInstance.h" // for InferenceInstance, TensorRTLogger
 
+#include <opencv2/core.hpp> // for cv::Mat, cv::Rect, cv::Size, cv::Vec3b
+#include <opencv2/imgproc.hpp> // for cv::resize, cv::INTER_LINEAR
+
 #include <cuda_runtime_api.h> // for cudaGetDeviceCount, cudaSetDevice, cudaGetErrorString
+
 #include <cstdio>             // for std::fprintf, stderr
 #include <fstream>            // for std::ifstream, std::ios, std::streamoff
 #include <vector>             // for std::vector
@@ -266,15 +270,25 @@ bool InferenceInstance::IsOpen() const noexcept
 		m_stream != nullptr;
 }
 
-bool InferenceInstance::Infer() noexcept
+bool InferenceInstance::Infer(const VI_ImageView& image) noexcept
 {
 	if (!IsOpen())
 	{
 		return false;
 	}
 
-	// 임시 입력 0 으로 설정
-	std::fill(m_hostInput.begin(), m_hostInput.end(), 0.0f);
+	std::fprintf(
+		stderr,
+		"[VisionInference] Image received: "
+		"width=%d, height=%d, stride=%zu bytes\n",
+		static_cast<int>(image.width),
+		static_cast<int>(image.height),
+		image.strideBytes);
+
+	if (!Preprocess(image))
+	{
+		return false;
+	}
 
 	if (!RunTensor())
 	{
@@ -670,6 +684,128 @@ bool InferenceInstance::PrepareExecution() noexcept
 	}
 
 	return true;
+}
+
+bool InferenceInstance::Preprocess(const VI_ImageView& image) noexcept
+{
+	try
+	{
+		if (image.data == nullptr ||
+			image.width <= 0 ||
+			image.height <= 0 ||
+			image.pixelFormat != VI_PIXEL_FORMAT_BGR8 ||
+			image.strideBytes / 3 < static_cast<std::size_t>(image.width))
+		{
+			return false;
+		}
+
+		// batch = 1, RGB 3 채널, 정사각형 NCHW 입력만 지원
+		const auto& shape = m_inputInfo.shape;
+
+		if (shape.nbDims != 4 ||
+			shape.d[0] != 1 ||
+			shape.d[1] != 3 ||
+			shape.d[2] <= 0 ||
+			shape.d[2] != shape.d[3] ||
+			shape.d[2] > (std::numeric_limits<int>::max)())
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] Expected input shape [1, 3, S, S].\n");
+
+			return false;
+		}
+
+		const int targetSize = static_cast<int>(shape.d[2]);
+
+		// Open에서 계산하고 할당한 입력 버퍼를 사용한다.
+		if (m_hostInput.size() != m_inputInfo.elementCount || m_hostInput.empty())
+		{
+			return false;
+		}
+
+		const cv::Mat cvSource(
+			image.height,
+			image.width,
+			CV_8UC3,
+			const_cast<uint8_t*>(image.data),
+			image.strideBytes);
+
+		// 짧은 변을 targetSize로 맞추고 종횡비를 유지한다.
+		const int shortSide = (std::min)(image.width, image.height);
+
+		const std::int64_t resizedWidth64 = static_cast<std::int64_t>(image.width) * targetSize / shortSide;
+		const std::int64_t resizedHeight64 = static_cast<std::int64_t>(image.height) * targetSize / shortSide;
+
+		if (resizedWidth64 > (std::numeric_limits<int>::max)() ||
+			resizedHeight64 > (std::numeric_limits<int>::max)())
+		{
+			return false;
+		}
+
+		const int resizedWidth = static_cast<int>(resizedWidth64);
+		const int resizedHeight = static_cast<int>(resizedHeight64);
+
+		cv::Mat cvResized;
+		
+		cv::resize(cvSource, cvResized, cv::Size(resizedWidth, resizedHeight), 0.0, 0.0, cv::INTER_LINEAR);
+
+		// Python CenterCrop 의 Round(diff / 2) 와 같은 짝수 반올림.
+		const auto centerOffset = [](int difference) noexcept
+			{
+				const int half = difference / 2;
+				return half * ((difference % 2 != 0 && half % 2 != 0) ? 1 : 0);
+			};
+
+		const int left = centerOffset(resizedWidth - targetSize);
+		const int top = centerOffset(resizedHeight - targetSize);
+
+		const cv::Mat cvCropped = cvResized(cv::Rect(left, top, targetSize, targetSize));
+
+		const std::size_t planeSize = m_inputInfo.elementCount / 3;
+
+		float* const red = m_hostInput.data();
+		float* const green = red + planeSize;
+		float* const blue = green + planeSize;
+
+		constexpr float scale = 1.0f / 255.0f;
+
+		for (int y = 0; y < targetSize; ++y)
+		{
+			const cv::Vec3b* row = cvCropped.ptr<cv::Vec3b>(y);
+
+			for (int x = 0; x < targetSize; ++x)
+			{
+				const std::size_t index = static_cast<std::size_t>(y) * targetSize + x;
+
+				// OpenCV의 BGR을 모델의 RGB 순서로 바꾸면서
+				// uint8 -> float, HWC -> CHW, 0~255 -> 0~1 변환.
+				red[index] = row[x][2] * scale;
+				green[index] = row[x][1] * scale;
+				blue[index] = row[x][0] * scale;
+			}
+		}
+
+		return true;
+
+	}
+	catch (const std::exception& exception)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Preprocess failed: %s\n",
+			exception.what());
+
+		return false;
+	}
+	catch (...)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Preprocess failed: unknown exception.\n");
+
+		return false;
+	}
 }
 
 bool InferenceInstance::RunTensor() noexcept
