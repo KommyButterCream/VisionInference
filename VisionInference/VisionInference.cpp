@@ -83,19 +83,17 @@ void VI_CALL VI_CloseModel(VI_Handle handle) noexcept
 	handle->instance.Close();
 }
 
-void VI_CALL VI_InferClassification(VI_Handle handle) noexcept
+VI_Status VI_CALL VI_InferClassification(VI_Handle handle) noexcept
 {
 	if (handle == nullptr)
 	{
-		return;
+		return VI_STATUS_INVALID_ARGUMENT;
 	}
 
-	try
+	if (!handle->instance.IsOpen())
 	{
-		//handle->instance.Infer();
+		return VI_STATUS_MODEL_NOT_OPEN;
 	}
-	catch (...)
-	{
-		
-	}
+
+	return handle->instance.Infer() ? VI_STATUS_OK : VI_STATUS_INFERENCE_FAILED;
 }

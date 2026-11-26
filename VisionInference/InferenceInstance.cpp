@@ -1,11 +1,13 @@
 #include "InferenceInstance.h" // for InferenceInstance, TensorRTLogger
 
-#include <cuda_runtime_api.h> // for cudaSetDevice, cudaGetErrorString
+#include <cuda_runtime_api.h> // for cudaGetDeviceCount, cudaSetDevice, cudaGetErrorString
 #include <cstdio>             // for std::fprintf, stderr
 #include <fstream>            // for std::ifstream, std::ios, std::streamoff
 #include <vector>             // for std::vector
 #include <cstddef>            // for std::size_t
 #include <exception>          // for std::exception
+#include <limits>			  // for std::numeric_limits
+#include <algorithm>		  // for std::fill, std::min
 
 void TensorRTLogger::log(Severity severity, const char* message) noexcept
 {
@@ -104,6 +106,8 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 			return false;
 		}
 
+		m_deviceId = deviceId;
+
 		// 5. TensorRT runtime 생성
 		m_runtime.reset(nvinfer1::createInferRuntime(m_logger));
 
@@ -132,6 +136,49 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 		
 		PrintModelInfo();
 
+		// 7. 추론 실행 Context 생성
+		m_executionContext.reset(m_engine->createExecutionContext());
+
+		if (!m_executionContext)
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] Failed to create execution context.\n");
+
+			Close();
+			return false;
+		}
+
+		if (!ReadModelInfo())
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] Failed to read supported model information.\n");
+
+			Close();
+			return false;
+		}
+
+		if (!AllocateBuffers())
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] Failed to allocate buffers.\n");
+
+			Close();
+			return false;
+		}
+
+		if (!PrepareExecution())
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] Failed to prepare execution.\n");
+
+			Close();
+			return false;
+		}
+
 		return true;
 	}
 	catch (const std::exception& exception)
@@ -157,14 +204,101 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 
 void InferenceInstance::Close() noexcept
 {
-	m_engine.reset();
+	if (m_deviceId >= 0)
+	{
+		if (!SelectDevice())
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] Device selection failed during Close; "
+				"attempting resource cleanup.\n");
+		}
+	}
 
+	if (m_stream != nullptr)
+	{
+		const cudaError_t status = cudaStreamSynchronize(m_stream);
+
+		if (status != cudaSuccess)
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] cudaStreamSynchronize failed: %s\n",
+				cudaGetErrorString(status));
+		}
+	}
+
+	m_executionContext.reset();
+
+	ReleaseBuffers();
+
+	if (m_stream != nullptr)
+	{
+		const cudaError_t status = cudaStreamDestroy(m_stream);
+
+		if (status != cudaSuccess)
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] cudaStreamDestroy failed: %s\n",
+				cudaGetErrorString(status));
+		}
+
+		m_stream = nullptr;
+	}
+
+	m_engine.reset();
 	m_runtime.reset();
+
+	m_inputInfo = {};
+	m_outputInfo = {};
+
+	m_deviceId = -1;
 }
 
 bool InferenceInstance::IsOpen() const noexcept
 {
-	return m_engine != nullptr;
+	return m_deviceId >= 0 &&
+		m_engine != nullptr &&
+		m_executionContext != nullptr &&
+		m_deviceInput != nullptr &&
+		m_deviceOutput != nullptr &&
+		m_stream != nullptr;
+}
+
+bool InferenceInstance::Infer() noexcept
+{
+	if (!IsOpen())
+	{
+		return false;
+	}
+
+	// 임시 입력 0 으로 설정
+	std::fill(m_hostInput.begin(), m_hostInput.end(), 0.0f);
+
+	if (!RunTensor())
+	{
+		return false;
+	}
+
+	// 실행 확인용으로 앞의 5개 원소만 출력
+	const std::size_t printCount =
+		(std::min)(m_hostOutput.size(), std::size_t{ 5 });
+
+	std::fprintf(
+		stderr,
+		"[VisionInference] Inference completed. Output preview:\n");
+
+	for (std::size_t index = 0; index < printCount; ++index)
+	{
+		std::fprintf(
+			stderr,
+			"  output[%zu] = %.8f\n",
+			index,
+			static_cast<double>(m_hostOutput[index]));
+	}
+
+	return true;
 }
 
 void InferenceInstance::PrintModelInfo() const noexcept
@@ -233,7 +367,8 @@ void InferenceInstance::PrintModelInfo() const noexcept
 		default:
 			break;
 		}
-
+		
+		// Tensor shape 출력
 		std::fprintf(
 			stderr,
 			"[VisionInference] %s name=%s, dtype=%s(%d), shape=[",
@@ -257,4 +392,365 @@ void InferenceInstance::PrintModelInfo() const noexcept
 
 		std::fprintf(stderr, "]\n");
 	}
+}
+
+bool InferenceInstance::SelectDevice() const noexcept
+{
+	if (m_deviceId < 0)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] No device has been assigned.\n");
+
+		return false;
+	}
+
+	const cudaError_t status = cudaSetDevice(m_deviceId);
+
+	if (status != cudaSuccess)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Failed to select device %d: %s\n",
+			static_cast<int>(m_deviceId),
+			cudaGetErrorString(status));
+
+		return false;
+	}
+
+	return true;
+}
+
+bool InferenceInstance::ReadModelInfo()
+{
+	m_inputInfo = {};
+	m_outputInfo = {};
+
+	// 일단 입력 하나와 출력 하나만 지원
+	if (!m_engine || m_engine->getNbIOTensors() != 2)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Expected one input and one output.\n");
+
+		return false;
+	}
+
+	for (int index = 0; index < 2; ++index)
+	{
+		const char* name = m_engine->getIOTensorName(index);
+
+		if (name == nullptr)
+		{
+			return false;
+		}
+
+		const auto mode = m_engine->getTensorIOMode(name);
+
+		TensorInfo* info = nullptr;
+
+		if (mode == nvinfer1::TensorIOMode::kINPUT)
+		{
+			info = &m_inputInfo;
+		}
+		else if (mode == nvinfer1::TensorIOMode::kOUTPUT)
+		{
+			info = &m_outputInfo;
+		}
+		else
+		{
+			return false;
+		}
+
+		if (!info->name.empty())
+		{
+			return false;
+		}
+
+		info->name = name;
+		info->shape = m_engine->getTensorShape(name);
+		info->dataType = m_engine->getTensorDataType(name);
+
+		// 일단 FP32 GPU 버퍼로 처리할 수 있는 형식만 지원
+		if (info->dataType != nvinfer1::DataType::kFLOAT ||
+			m_engine->getTensorFormat(name) != nvinfer1::TensorFormat::kLINEAR ||
+			m_engine->getTensorLocation(name) != nvinfer1::TensorLocation::kDEVICE ||
+			m_engine->isShapeInferenceIO(name))
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] Unsupported tensor format: %s\n",
+				name);
+
+			return false;
+		}
+
+		if (info->shape.nbDims <= 0)
+		{
+			return false;
+		}
+
+		std::size_t elementCount = 1;
+
+		constexpr std::size_t maxSize = (std::numeric_limits<std::size_t>::max)();
+
+		for (int dimension = 0; dimension < info->shape.nbDims; ++dimension)
+		{
+			const auto size = info->shape.d[dimension];
+
+			// -1은 동적 차원이다. 첫 버전에서는 지원하지 않는다.
+			if (size <= 0)
+			{
+				std::fprintf(
+					stderr,
+					"[VisionInference] Expected a fixed positive shape: %s\n",
+					name);
+
+				return false;
+			}
+
+			// Overflow 확인
+			if (static_cast<std::uint64_t>(size) > maxSize / elementCount)
+			{
+				return false;
+			}
+
+			elementCount *= static_cast<std::size_t>(size);
+		}
+
+		// Overflow 확인
+		if (elementCount > maxSize / sizeof(float))
+		{
+			return false;
+		}
+
+		info->elementCount = elementCount;
+		info->byteSize = elementCount * sizeof(float);
+
+		std::fprintf(
+			stderr,
+			"[VisionInference] %s: elements=%zu, bytes=%zu\n",
+			name,
+			info->elementCount,
+			info->byteSize);
+	}
+
+	return !m_inputInfo.name.empty() && !m_outputInfo.name.empty();
+}
+
+bool InferenceInstance::AllocateBuffers()
+{
+	if (m_deviceInput != nullptr || m_deviceOutput != nullptr)
+	{
+		return false;
+	}
+
+	if (m_inputInfo.byteSize == 0 || m_outputInfo.byteSize == 0)
+	{
+		return false;
+	}
+
+	if (!SelectDevice())
+	{
+		return false;
+	}
+
+	m_hostInput.assign(m_inputInfo.elementCount, 0.0f);
+	m_hostOutput.assign(m_inputInfo.elementCount, 0.0f);
+
+	cudaError_t status = cudaMalloc(&m_deviceInput, m_inputInfo.byteSize);
+
+	if (status != cudaSuccess)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Input cudaMalloc failed: %s\n",
+			cudaGetErrorString(status));
+
+		return false;
+	}
+
+	status = cudaMalloc(&m_deviceOutput, m_outputInfo.byteSize);
+
+	if (status != cudaSuccess)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Output cudaMalloc failed: %s\n",
+			cudaGetErrorString(status));
+
+		return false;
+	}
+
+	return true;
+}
+
+void InferenceInstance::ReleaseBuffers() noexcept
+{
+	if (m_deviceOutput != nullptr)
+	{
+		const cudaError_t status = cudaFree(m_deviceOutput);
+
+		if (status != cudaSuccess)
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] Output cudaFree failed: %s\n",
+				cudaGetErrorString(status));
+		}
+
+		m_deviceOutput = nullptr;
+	}
+
+	if (m_deviceInput != nullptr)
+	{
+		const cudaError_t status = cudaFree(m_deviceInput);
+
+		if (status != cudaSuccess)
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] Input cudaFree failed: %s\n",
+				cudaGetErrorString(status));
+		}
+
+		m_deviceInput = nullptr;
+	}
+
+	std::vector<float>().swap(m_hostOutput);
+	std::vector<float>().swap(m_hostInput);
+}
+
+bool InferenceInstance::PrepareExecution() noexcept
+{
+	if (!m_executionContext ||
+		m_deviceInput == nullptr ||
+		m_deviceOutput == nullptr ||
+		m_stream != nullptr)
+	{
+		return false;
+	}
+
+	if (!SelectDevice())
+	{
+		return false;
+	}
+
+	// 1. GPU 작업을 제출할 stream 생성
+	const cudaError_t status = cudaStreamCreate(&m_stream);
+
+	if (status != cudaSuccess)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] cudaStreamCreate failed: %s\n",
+			cudaGetErrorString(status));
+
+		return false;
+	}
+	
+	// 2. 입력 tensor 에 GPU 입력 버퍼 주소 등록
+	if (!m_executionContext->setTensorAddress(m_inputInfo.name.c_str(), m_deviceInput))
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Failed to set input tensor address.\n");
+
+		return false;
+	}
+
+	// 3. 출력 tensor 에 GPU 출력 버퍼 주소 등록
+	if (!m_executionContext->setTensorAddress(m_outputInfo.name.c_str(), m_deviceOutput))
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Failed to set output tensor address.\n");
+
+		return false;
+	}
+
+	return true;
+}
+
+bool InferenceInstance::RunTensor() noexcept
+{
+	if (!IsOpen())
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Model is not ready.\n");
+
+		return false;
+	}
+
+	if (!SelectDevice())
+	{
+		return false;
+	}
+
+	// 1. CPU 입력 -> GPU 입력
+	cudaError_t status = cudaMemcpyAsync(
+		m_deviceInput,
+		m_hostInput.data(),
+		m_inputInfo.byteSize,
+		cudaMemcpyHostToDevice,
+		m_stream);
+
+
+	if (status != cudaSuccess)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Input copy failed: %s\n",
+			cudaGetErrorString(status));
+
+		Close();
+		return false;
+	}
+
+	// 2. 추론 실행 요청
+	if (!m_executionContext->enqueueV3(m_stream))
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] TensorRT enqueueV3 failed.\n");
+
+		Close();
+		return false;
+	}
+
+	// 3. GPU 출력 -> CPU 출력
+	status = cudaMemcpyAsync(
+		m_hostOutput.data(),
+		m_deviceOutput,
+		m_outputInfo.byteSize,
+		cudaMemcpyDeviceToHost,
+		m_stream);
+
+	if (status != cudaSuccess)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Output copy failed: %s\n",
+			cudaGetErrorString(status));
+
+		Close();
+		return false;
+	}
+
+	// 4. 복사 완료 대기
+	status = cudaStreamSynchronize(m_stream);
+
+	if (status != cudaSuccess)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Inference synchronization failed: %s\n",
+			cudaGetErrorString(status));
+
+		Close();
+		return false;
+	}
+
+	return true;
 }
