@@ -1,9 +1,9 @@
-#include "VisionInference.h"
+#include "VisionInference.h"  // for public C API declarations, VI_Status
 
-#include "InferenceInstance.h"
+#include "InferenceInstance.h" // for InferenceInstance
 
-#include <new>     // for std::nothrow
-#include <limits> // for std::numeric_limits
+#include <new>        // for std::nothrow, std::bad_alloc
+#include <filesystem> // for std::filesystem::path
 
 // 실제 정의는 DLL 내부에서만 공개
 struct VI_Context final
@@ -43,20 +43,33 @@ void VI_CALL VI_Destroy(VI_Handle handle) noexcept
 	delete handle;
 }
 
-void VI_CALL VI_OpenModel(VI_Handle handle) noexcept
+VI_Status VI_CALL VI_OpenModel(VI_Handle handle, const wchar_t* enginePath, int32_t deviceId) noexcept
 {
-	if (handle == nullptr)
+	if (handle == nullptr || enginePath == nullptr || enginePath[0] == L'\0' || deviceId < 0)
 	{
-		return;
+		return VI_STATUS_INVALID_ARGUMENT;
 	}
 
 	try
 	{
-		//handle->instance.Open();
+		const std::filesystem::path path(enginePath);
+
+		const bool opened = handle->instance.Open(path, deviceId);
+
+		if (!opened)
+		{
+			return VI_STATUS_MODEL_OPEN_FAILED;
+		}
+
+		return VI_STATUS_OK;
+	}
+	catch (const std::bad_alloc&)
+	{
+		return VI_STATUS_OUT_OF_MEMORY;
 	}
 	catch (...)
 	{
-
+		return VI_STATUS_INTERNAL_ERROR;
 	}
 }
 
@@ -67,14 +80,7 @@ void VI_CALL VI_CloseModel(VI_Handle handle) noexcept
 		return;
 	}
 
-	try
-	{
-		//handle->instance.Close();
-	}
-	catch (...)
-	{
-
-	}
+	handle->instance.Close();
 }
 
 void VI_CALL VI_InferClassification(VI_Handle handle) noexcept
