@@ -40,14 +40,20 @@ enum ENUM_VI_PIXEL_FORMAT
 // 이미지 메모리를 소유하지 않고, 외부 이미지의 정보를 전달한다.
 typedef struct VI_ImageView
 {
-    const uint8_t* data;
+    const uint8_t* data = nullptr;
 
-    int32_t width;
-    int32_t height;
+    int32_t width = 0;
+    int32_t height = 0;
 
-    size_t strideBytes;
-    int32_t pixelFormat;
+    size_t strideBytes = 0ULL;
+    int32_t pixelFormat = 0;
 } VI_ImageView;
+
+typedef struct VI_ClassificationResult
+{
+    int32_t classId = -1;
+    float score = 0.0f; 
+} VI_ClassificationResult;
 
 VI_API VI_Status VI_CALL VI_Create(VI_Handle* out_handle) VI_NOEXCEPT;
 VI_API void VI_CALL VI_Destroy(VI_Handle handle) VI_NOEXCEPT;
@@ -55,7 +61,7 @@ VI_API void VI_CALL VI_Destroy(VI_Handle handle) VI_NOEXCEPT;
 VI_API VI_Status VI_CALL VI_OpenModel(VI_Handle handle, const wchar_t* enginePath, int32_t deviceId) VI_NOEXCEPT;
 VI_API void VI_CALL VI_CloseModel(VI_Handle handle) VI_NOEXCEPT;
 
-VI_API VI_Status VI_CALL VI_InferClassification(VI_Handle handle, const VI_ImageView* image) VI_NOEXCEPT;
+VI_API VI_Status VI_CALL VI_InferClassification(VI_Handle handle, const VI_ImageView* image, VI_ClassificationResult* outResult) VI_NOEXCEPT;
 
 
 #ifdef __cplusplus

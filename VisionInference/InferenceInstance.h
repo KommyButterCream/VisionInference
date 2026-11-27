@@ -46,7 +46,7 @@ public:
 	void Close() noexcept;
 	bool IsOpen() const noexcept;
 
-	bool Infer(const VI_ImageView& image) noexcept;
+	bool Infer(const VI_ImageView& image, VI_ClassificationResult& result) noexcept;
 
 private:
 	void PrintModelInfo() const noexcept;
@@ -60,6 +60,7 @@ private:
 
 	bool Preprocess(const VI_ImageView& image) noexcept;
 	bool RunTensor() noexcept;
+	bool Postprocess(VI_ClassificationResult& result) const noexcept;
 
 private:
 	std::int32_t m_deviceId = -1;

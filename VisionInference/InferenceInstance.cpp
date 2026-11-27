@@ -12,6 +12,7 @@
 #include <exception>          // for std::exception
 #include <limits>			  // for std::numeric_limits
 #include <algorithm>		  // for std::fill, std::min
+#include <cmath> // for std::isfinite
 
 void TensorRTLogger::log(Severity severity, const char* message) noexcept
 {
@@ -270,20 +271,14 @@ bool InferenceInstance::IsOpen() const noexcept
 		m_stream != nullptr;
 }
 
-bool InferenceInstance::Infer(const VI_ImageView& image) noexcept
+bool InferenceInstance::Infer(const VI_ImageView& image, VI_ClassificationResult& result) noexcept
 {
+	result = { -1, 0.0f };
+
 	if (!IsOpen())
 	{
 		return false;
 	}
-
-	std::fprintf(
-		stderr,
-		"[VisionInference] Image received: "
-		"width=%d, height=%d, stride=%zu bytes\n",
-		static_cast<int>(image.width),
-		static_cast<int>(image.height),
-		image.strideBytes);
 
 	if (!Preprocess(image))
 	{
@@ -295,24 +290,7 @@ bool InferenceInstance::Infer(const VI_ImageView& image) noexcept
 		return false;
 	}
 
-	// 실행 확인용으로 앞의 5개 원소만 출력
-	const std::size_t printCount =
-		(std::min)(m_hostOutput.size(), std::size_t{ 5 });
-
-	std::fprintf(
-		stderr,
-		"[VisionInference] Inference completed. Output preview:\n");
-
-	for (std::size_t index = 0; index < printCount; ++index)
-	{
-		std::fprintf(
-			stderr,
-			"  output[%zu] = %.8f\n",
-			index,
-			static_cast<double>(m_hostOutput[index]));
-	}
-
-	return true;
+	return Postprocess(result);
 }
 
 void InferenceInstance::PrintModelInfo() const noexcept
@@ -570,7 +548,7 @@ bool InferenceInstance::AllocateBuffers()
 	}
 
 	m_hostInput.assign(m_inputInfo.elementCount, 0.0f);
-	m_hostOutput.assign(m_inputInfo.elementCount, 0.0f);
+	m_hostOutput.assign(m_outputInfo.elementCount, 0.0f);
 
 	cudaError_t status = cudaMalloc(&m_deviceInput, m_inputInfo.byteSize);
 
@@ -754,7 +732,7 @@ bool InferenceInstance::Preprocess(const VI_ImageView& image) noexcept
 		const auto centerOffset = [](int difference) noexcept
 			{
 				const int half = difference / 2;
-				return half * ((difference % 2 != 0 && half % 2 != 0) ? 1 : 0);
+				return half + ((difference % 2 != 0 && half % 2 != 0) ? 1 : 0);
 			};
 
 		const int left = centerOffset(resizedWidth - targetSize);
@@ -887,6 +865,63 @@ bool InferenceInstance::RunTensor() noexcept
 		Close();
 		return false;
 	}
+
+	return true;
+}
+
+bool InferenceInstance::Postprocess(VI_ClassificationResult& result) const noexcept
+{
+	result = { -1, 0.0f };
+
+	const auto& shape = m_outputInfo.shape;
+
+	// 현재는 이미지 한 장의 클래스별 점수 [1, C]만 지원한다.
+	if (shape.nbDims != 2 ||
+		shape.d[0] != 1 ||
+		shape.d[1] <= 0 ||
+		shape.d[1] > (std::numeric_limits<int32_t>::max)())
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Expected output shape [1, C].\n");
+
+		return false;
+	}
+
+	const std::size_t classCount = static_cast<std::size_t>(shape.d[1]);
+
+	if (m_hostOutput.size() != classCount)
+	{
+		return false;
+	}
+
+	std::size_t bestIndex = 0;
+	float bestScore = (std::numeric_limits<float>::lowest)();
+
+	for (std::size_t index = 0; index < classCount; ++index)
+	{
+		const float score = m_hostOutput[index];
+
+		if (!std::isfinite(score))
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] Non-finite output at index %zu.\n",
+				index);
+
+			return false;
+		}
+
+
+		if (score > bestScore)
+		{
+			bestScore = score;
+			bestIndex = index;
+		}
+	}
+
+	result.classId = static_cast<int32_t>(bestIndex);
+	result.score = bestScore;
 
 	return true;
 }
