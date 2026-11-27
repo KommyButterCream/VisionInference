@@ -1,8 +1,5 @@
 #include "InferenceInstance.h" // for InferenceInstance, TensorRTLogger
 
-#include <opencv2/core.hpp> // for cv::Mat, cv::Rect, cv::Size, cv::Vec3b
-#include <opencv2/imgproc.hpp> // for cv::resize, cv::INTER_LINEAR
-
 #include <cuda_runtime_api.h> // for cudaGetDeviceCount, cudaSetDevice, cudaGetErrorString
 
 #include <cstdio>             // for std::fprintf, stderr
@@ -11,8 +8,6 @@
 #include <cstddef>            // for std::size_t
 #include <exception>          // for std::exception
 #include <limits>			  // for std::numeric_limits
-#include <algorithm>		  // for std::fill, std::min
-#include <cmath> // for std::isfinite
 #include <span> // for std::span
 
 void TensorRTLogger::log(Severity severity, const char* message) noexcept
@@ -30,7 +25,6 @@ void TensorRTLogger::log(Severity severity, const char* message) noexcept
 
 	std::fprintf(stderr, "[TensorRT] %s\n", message);
 }
-
 
 InferenceInstance::~InferenceInstance() noexcept
 {
@@ -139,7 +133,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 			Close();
 			return false;
 		}
-		
+
 		PrintModelInfo();
 
 		// 7. 추론 실행 Context 생성
@@ -220,48 +214,28 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 
 void InferenceInstance::Close() noexcept
 {
-	if (m_deviceId >= 0)
+	if (m_deviceId >= 0 && !SelectDevice())
 	{
-		if (!SelectDevice())
-		{
-			std::fprintf(
-				stderr,
-				"[VisionInference] Device selection failed during Close; "
-				"attempting resource cleanup.\n");
-		}
+		std::fprintf(
+			stderr,
+			"[VisionInference] Device selection failed during Close; "
+			"attempting resource cleanup.\n");
 	}
 
-	if (m_stream != nullptr)
+	// Context와 버퍼를 해제하기 전에 실행 완료를 기다린다.
+	if (!m_stream.Synchronize())
 	{
-		const cudaError_t status = cudaStreamSynchronize(m_stream);
-
-		if (status != cudaSuccess)
-		{
-			std::fprintf(
-				stderr,
-				"[VisionInference] cudaStreamSynchronize failed: %s\n",
-				cudaGetErrorString(status));
-		}
+		std::fprintf(
+			stderr,
+			"[VisionInference] Stream synchronization failed during Close; "
+			"attempting resource cleanup.\n");
 	}
 
 	m_executionContext.reset();
 
 	ReleaseBuffers();
 
-	if (m_stream != nullptr)
-	{
-		const cudaError_t status = cudaStreamDestroy(m_stream);
-
-		if (status != cudaSuccess)
-		{
-			std::fprintf(
-				stderr,
-				"[VisionInference] cudaStreamDestroy failed: %s\n",
-				cudaGetErrorString(status));
-		}
-
-		m_stream = nullptr;
-	}
+	m_stream.Reset();
 
 	m_engine.reset();
 	m_runtime.reset();
@@ -279,9 +253,9 @@ bool InferenceInstance::IsOpen() const noexcept
 	return m_deviceId >= 0 &&
 		m_engine != nullptr &&
 		m_executionContext != nullptr &&
-		m_deviceInput != nullptr &&
-		m_deviceOutput != nullptr &&
-		m_stream != nullptr;
+		m_deviceInput.Data() != nullptr &&
+		m_deviceOutput.Data() != nullptr &&
+		m_stream.Get() != nullptr;
 }
 
 bool InferenceInstance::Infer(const VI_ImageView& image, VI_ClassificationResult& result) noexcept
@@ -305,7 +279,7 @@ bool InferenceInstance::Infer(const VI_ImageView& image, VI_ClassificationResult
 		return false;
 	}
 
-	const std::span<float> outputTensor(m_hostOutput.data(), m_hostOutput.size());
+	const std::span<const float> outputTensor(m_hostOutput.data(), m_hostOutput.size());
 
 	return m_classificationTask.Postprocess(outputTensor, result);
 }
@@ -323,7 +297,7 @@ void InferenceInstance::PrintModelInfo() const noexcept
 		stderr,
 		"[VisionInference] I/O tensor count: %d\n",
 		static_cast<int>(tensorCount));
-	
+
 	for (int index = 0; index < tensorCount; ++index)
 	{
 		const char* name = m_engine->getIOTensorName(index);
@@ -376,7 +350,7 @@ void InferenceInstance::PrintModelInfo() const noexcept
 		default:
 			break;
 		}
-		
+
 		// Tensor shape 출력
 		std::fprintf(
 			stderr,
@@ -549,7 +523,7 @@ bool InferenceInstance::ReadModelInfo()
 
 bool InferenceInstance::AllocateBuffers()
 {
-	if (m_deviceInput != nullptr || m_deviceOutput != nullptr)
+	if (m_deviceInput.Data() != nullptr || m_deviceOutput.Data() != nullptr)
 	{
 		return false;
 	}
@@ -559,35 +533,16 @@ bool InferenceInstance::AllocateBuffers()
 		return false;
 	}
 
-	if (!SelectDevice())
-	{
-		return false;
-	}
-
 	m_hostInput.assign(m_inputInfo.elementCount, 0.0f);
 	m_hostOutput.assign(m_outputInfo.elementCount, 0.0f);
 
-	cudaError_t status = cudaMalloc(&m_deviceInput, m_inputInfo.byteSize);
-
-	if (status != cudaSuccess)
+	if (!m_deviceInput.Allocate(m_inputInfo.byteSize, m_deviceId))
 	{
-		std::fprintf(
-			stderr,
-			"[VisionInference] Input cudaMalloc failed: %s\n",
-			cudaGetErrorString(status));
-
 		return false;
 	}
 
-	status = cudaMalloc(&m_deviceOutput, m_outputInfo.byteSize);
-
-	if (status != cudaSuccess)
+	if (!m_deviceOutput.Allocate(m_outputInfo.byteSize, m_deviceId))
 	{
-		std::fprintf(
-			stderr,
-			"[VisionInference] Output cudaMalloc failed: %s\n",
-			cudaGetErrorString(status));
-
 		return false;
 	}
 
@@ -596,35 +551,8 @@ bool InferenceInstance::AllocateBuffers()
 
 void InferenceInstance::ReleaseBuffers() noexcept
 {
-	if (m_deviceOutput != nullptr)
-	{
-		const cudaError_t status = cudaFree(m_deviceOutput);
-
-		if (status != cudaSuccess)
-		{
-			std::fprintf(
-				stderr,
-				"[VisionInference] Output cudaFree failed: %s\n",
-				cudaGetErrorString(status));
-		}
-
-		m_deviceOutput = nullptr;
-	}
-
-	if (m_deviceInput != nullptr)
-	{
-		const cudaError_t status = cudaFree(m_deviceInput);
-
-		if (status != cudaSuccess)
-		{
-			std::fprintf(
-				stderr,
-				"[VisionInference] Input cudaFree failed: %s\n",
-				cudaGetErrorString(status));
-		}
-
-		m_deviceInput = nullptr;
-	}
+	m_deviceOutput.Reset();
+	m_deviceInput.Reset();
 
 	std::vector<float>().swap(m_hostOutput);
 	std::vector<float>().swap(m_hostInput);
@@ -633,33 +561,20 @@ void InferenceInstance::ReleaseBuffers() noexcept
 bool InferenceInstance::PrepareExecution() noexcept
 {
 	if (!m_executionContext ||
-		m_deviceInput == nullptr ||
-		m_deviceOutput == nullptr ||
-		m_stream != nullptr)
+		m_deviceInput.Data() == nullptr ||
+		m_deviceOutput.Data() == nullptr ||
+		m_stream.Get() != nullptr)
 	{
 		return false;
 	}
 
-	if (!SelectDevice())
+	if (!m_stream.Create(m_deviceId))
 	{
 		return false;
 	}
 
-	// 1. GPU 작업을 제출할 stream 생성
-	const cudaError_t status = cudaStreamCreate(&m_stream);
-
-	if (status != cudaSuccess)
-	{
-		std::fprintf(
-			stderr,
-			"[VisionInference] cudaStreamCreate failed: %s\n",
-			cudaGetErrorString(status));
-
-		return false;
-	}
-	
 	// 2. 입력 tensor 에 GPU 입력 버퍼 주소 등록
-	if (!m_executionContext->setTensorAddress(m_inputInfo.name.c_str(), m_deviceInput))
+	if (!m_executionContext->setTensorAddress(m_inputInfo.name.c_str(), m_deviceInput.Data()))
 	{
 		std::fprintf(
 			stderr,
@@ -669,7 +584,7 @@ bool InferenceInstance::PrepareExecution() noexcept
 	}
 
 	// 3. 출력 tensor 에 GPU 출력 버퍼 주소 등록
-	if (!m_executionContext->setTensorAddress(m_outputInfo.name.c_str(), m_deviceOutput))
+	if (!m_executionContext->setTensorAddress(m_outputInfo.name.c_str(), m_deviceOutput.Data()))
 	{
 		std::fprintf(
 			stderr,
@@ -699,12 +614,11 @@ bool InferenceInstance::RunTensor() noexcept
 
 	// 1. CPU 입력 -> GPU 입력
 	cudaError_t status = cudaMemcpyAsync(
-		m_deviceInput,
+		m_deviceInput.Data(),
 		m_hostInput.data(),
 		m_inputInfo.byteSize,
 		cudaMemcpyHostToDevice,
-		m_stream);
-
+		m_stream.Get());
 
 	if (status != cudaSuccess)
 	{
@@ -718,7 +632,7 @@ bool InferenceInstance::RunTensor() noexcept
 	}
 
 	// 2. 추론 실행 요청
-	if (!m_executionContext->enqueueV3(m_stream))
+	if (!m_executionContext->enqueueV3(m_stream.Get()))
 	{
 		std::fprintf(
 			stderr,
@@ -731,10 +645,10 @@ bool InferenceInstance::RunTensor() noexcept
 	// 3. GPU 출력 -> CPU 출력
 	status = cudaMemcpyAsync(
 		m_hostOutput.data(),
-		m_deviceOutput,
+		m_deviceOutput.Data(),
 		m_outputInfo.byteSize,
 		cudaMemcpyDeviceToHost,
-		m_stream);
+		m_stream.Get());
 
 	if (status != cudaSuccess)
 	{
@@ -747,16 +661,8 @@ bool InferenceInstance::RunTensor() noexcept
 		return false;
 	}
 
-	// 4. 복사 완료 대기
-	status = cudaStreamSynchronize(m_stream);
-
-	if (status != cudaSuccess)
+	if (!m_stream.Synchronize())
 	{
-		std::fprintf(
-			stderr,
-			"[VisionInference] Inference synchronization failed: %s\n",
-			cudaGetErrorString(status));
-
 		Close();
 		return false;
 	}

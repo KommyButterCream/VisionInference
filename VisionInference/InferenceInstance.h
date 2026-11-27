@@ -3,9 +3,9 @@
 #include "VisionInference.h" // for VI_ImageView, VI_ClassificationResult
 #include "InferenceTypes.h" // for TensorInfo
 #include "ClassificationTask.h" // for ClassificationTask
+#include "Buffers.h" // for DeviceBuffer, CudaStream
 
 #include <NvInferRuntime.h> // for nvinfer1::ILogger, IRuntime, ICudaEngine, IExecutionContext
-#include <cuda_runtime_api.h> // for cudaStream_t
 
 #include <memory> // for std::unique_ptr
 #include <cstdint> // for std::int32_t
@@ -30,7 +30,7 @@ public:
 
 	InferenceInstance(InferenceInstance&&) = delete;
 	InferenceInstance& operator=(InferenceInstance&&) = delete;
-	
+
 	bool Open(const std::filesystem::path& enginePath, std::int32_t deviceId = 0);
 	void Close() noexcept;
 	bool IsOpen() const noexcept;
@@ -62,10 +62,10 @@ private:
 	std::vector<float> m_hostOutput;
 
 	// GPU memory
-	void* m_deviceInput = nullptr;
-	void* m_deviceOutput = nullptr;
+	DeviceBuffer m_deviceInput;
+	DeviceBuffer m_deviceOutput;
 
-	cudaStream_t m_stream = nullptr;
+	CudaStream m_stream;
 
 	TensorRTLogger m_logger;
 

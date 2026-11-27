@@ -11,8 +11,6 @@
 #include <exception> // for std::exception
 #include <limits> // for std::numeric_limits
 
-
-
 bool ClassificationTask::Configure(
 	const TensorInfo& inputInfo,
 	const TensorInfo& outputInfo) noexcept
@@ -33,10 +31,10 @@ bool ClassificationTask::Configure(
 	const auto& outputShape = outputInfo.shape;
 
 	if (inputShape.nbDims != 4 || // 차원 수량
-		inputShape.d[0] != 1 ||	  // 한번에 처리할 이미지가 1장인가?
+		inputShape.d[0] != 1 ||	  // 한 번에 처리할 이미지가 1장인가?
 		inputShape.d[1] != 3 ||	  // 채널 수
 		inputShape.d[2] <= 0 ||	  // 높이
-		inputShape.d[2] != inputShape.d[3] || // 너비
+		inputShape.d[2] != inputShape.d[3] || // 높이와 너비 비교
 		inputShape.d[2] > (std::numeric_limits<int>::max)())
 	{
 		std::fprintf(
@@ -47,8 +45,8 @@ bool ClassificationTask::Configure(
 	}
 
 	if (outputShape.nbDims != 2 ||
-		outputShape.d[0] != 1 ||	// 한 번에 검사할이미지 수량
-		outputShape.d[1] <= 0 ||	// 이미지 한장에 대한 클래스 점수 개수
+		outputShape.d[0] != 1 ||	// 한 번에 검사할 이미지 수량
+		outputShape.d[1] <= 0 ||	// 이미지 한 장에 대한 클래스 점수 개수
 		outputShape.d[1] > (std::numeric_limits<int32_t>::max)())
 	{
 		std::fprintf(
@@ -66,8 +64,8 @@ bool ClassificationTask::Configure(
 	{
 		return false;
 	}
-	// 채널 하나 : 224 × 224 = 50, 176개
-	// 전체 입력 : 50, 176 × 3 = 150, 528개
+	// 채널 하나 : 224 × 224 = 50,176개
+	// 전체 입력 : 50,176 × 3 = 150,528개
 	// [R 50,176개][G 50,176개][B 50,176개]
 	// 채널 하나의 원소 수(R,G,B)
 	const std::size_t planeSize = side * side;
@@ -76,7 +74,7 @@ bool ClassificationTask::Configure(
 	{
 		return false;
 	}
-	
+
 	const std::size_t inputCount = planeSize * 3;
 
 	if (inputCount > maxSize / sizeof(float) || classCount > maxSize / sizeof(float))
@@ -160,7 +158,7 @@ bool ClassificationTask::Preprocess(
 
 		cv::resize(cvSource, cvResized, cv::Size(resizedWidth, resizedHeight), 0.0, 0.0, cv::INTER_LINEAR);
 
-		// Python CenterCrop 의 Round(diff / 2) 와 같은 짝수 반올림.
+		// Python CenterCrop의 round(diff / 2) 와 같은 짝수 반올림.
 		const auto centerOffset = [](int difference) noexcept
 			{
 				const int half = difference / 2;
@@ -231,11 +229,6 @@ bool ClassificationTask::Postprocess(
 
 	const std::size_t classCount = m_classCount;
 
-	if (outputTensor.size() != classCount)
-	{
-		return false;
-	}
-
 	std::size_t bestIndex = 0;
 	float bestScore = (std::numeric_limits<float>::lowest)();
 
@@ -252,7 +245,6 @@ bool ClassificationTask::Postprocess(
 
 			return false;
 		}
-
 
 		if (score > bestScore)
 		{
