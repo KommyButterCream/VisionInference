@@ -1,33 +1,22 @@
 #pragma once
 
+#include "VisionInference.h" // for VI_ImageView, VI_ClassificationResult
+#include "InferenceTypes.h" // for TensorInfo
+#include "ClassificationTask.h" // for ClassificationTask
+
 #include <NvInferRuntime.h> // for nvinfer1::ILogger, IRuntime, ICudaEngine, IExecutionContext
 #include <cuda_runtime_api.h> // for cudaStream_t
 
-#include <memory>           // for std::unique_ptr
+#include <memory> // for std::unique_ptr
 #include <cstdint> // for std::int32_t
-#include <filesystem>       // for std::filesystem::path
-#include <string>  // for std::string
-#include <cstddef> // for std::size_t
+#include <filesystem> // for std::filesystem::path
 #include <vector> // for std::vector
-
-#include "VisionInference.h" // for VI_ImageView
 
 // TensorRT가 전달하는 오류, 경고 메시지를 처리하기 위한 로거 클래스
 class TensorRTLogger final : public nvinfer1::ILogger
 {
 public:
 	void log(Severity severity, const char* message) noexcept override;
-};
-
-struct TensorInfo
-{
-	std::string name;
-
-	nvinfer1::Dims shape{};
-	nvinfer1::DataType dataType = nvinfer1::DataType::kFLOAT;
-
-	std::size_t elementCount = 0;
-	std::size_t byteSize = 0;
 };
 
 class InferenceInstance
@@ -58,15 +47,15 @@ private:
 
 	bool PrepareExecution() noexcept;
 
-	bool Preprocess(const VI_ImageView& image) noexcept;
 	bool RunTensor() noexcept;
-	bool Postprocess(VI_ClassificationResult& result) const noexcept;
 
 private:
 	std::int32_t m_deviceId = -1;
 
 	TensorInfo m_inputInfo;
 	TensorInfo m_outputInfo;
+
+	ClassificationTask m_classificationTask;
 
 	// CPU memory
 	std::vector<float> m_hostInput;

@@ -13,6 +13,7 @@
 #include <limits>			  // for std::numeric_limits
 #include <algorithm>		  // for std::fill, std::min
 #include <cmath> // for std::isfinite
+#include <span> // for std::span
 
 void TensorRTLogger::log(Severity severity, const char* message) noexcept
 {
@@ -164,6 +165,16 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 			return false;
 		}
 
+		if (!m_classificationTask.Configure(m_inputInfo, m_outputInfo))
+		{
+			std::fprintf(
+				stderr,
+				"[VisionInference] Unsupported classification model contract.\n");
+
+			Close();
+			return false;
+		}
+
 		if (!AllocateBuffers())
 		{
 			std::fprintf(
@@ -255,6 +266,8 @@ void InferenceInstance::Close() noexcept
 	m_engine.reset();
 	m_runtime.reset();
 
+	m_classificationTask.Reset();
+
 	m_inputInfo = {};
 	m_outputInfo = {};
 
@@ -280,7 +293,9 @@ bool InferenceInstance::Infer(const VI_ImageView& image, VI_ClassificationResult
 		return false;
 	}
 
-	if (!Preprocess(image))
+	const std::span<float> inputTensor(m_hostInput.data(), m_hostInput.size());
+
+	if (!m_classificationTask.Preprocess(image, inputTensor))
 	{
 		return false;
 	}
@@ -290,7 +305,9 @@ bool InferenceInstance::Infer(const VI_ImageView& image, VI_ClassificationResult
 		return false;
 	}
 
-	return Postprocess(result);
+	const std::span<float> outputTensor(m_hostOutput.data(), m_hostOutput.size());
+
+	return m_classificationTask.Postprocess(outputTensor, result);
 }
 
 void InferenceInstance::PrintModelInfo() const noexcept
@@ -664,128 +681,6 @@ bool InferenceInstance::PrepareExecution() noexcept
 	return true;
 }
 
-bool InferenceInstance::Preprocess(const VI_ImageView& image) noexcept
-{
-	try
-	{
-		if (image.data == nullptr ||
-			image.width <= 0 ||
-			image.height <= 0 ||
-			image.pixelFormat != VI_PIXEL_FORMAT_BGR8 ||
-			image.strideBytes / 3 < static_cast<std::size_t>(image.width))
-		{
-			return false;
-		}
-
-		// batch = 1, RGB 3 채널, 정사각형 NCHW 입력만 지원
-		const auto& shape = m_inputInfo.shape;
-
-		if (shape.nbDims != 4 ||
-			shape.d[0] != 1 ||
-			shape.d[1] != 3 ||
-			shape.d[2] <= 0 ||
-			shape.d[2] != shape.d[3] ||
-			shape.d[2] > (std::numeric_limits<int>::max)())
-		{
-			std::fprintf(
-				stderr,
-				"[VisionInference] Expected input shape [1, 3, S, S].\n");
-
-			return false;
-		}
-
-		const int targetSize = static_cast<int>(shape.d[2]);
-
-		// Open에서 계산하고 할당한 입력 버퍼를 사용한다.
-		if (m_hostInput.size() != m_inputInfo.elementCount || m_hostInput.empty())
-		{
-			return false;
-		}
-
-		const cv::Mat cvSource(
-			image.height,
-			image.width,
-			CV_8UC3,
-			const_cast<uint8_t*>(image.data),
-			image.strideBytes);
-
-		// 짧은 변을 targetSize로 맞추고 종횡비를 유지한다.
-		const int shortSide = (std::min)(image.width, image.height);
-
-		const std::int64_t resizedWidth64 = static_cast<std::int64_t>(image.width) * targetSize / shortSide;
-		const std::int64_t resizedHeight64 = static_cast<std::int64_t>(image.height) * targetSize / shortSide;
-
-		if (resizedWidth64 > (std::numeric_limits<int>::max)() ||
-			resizedHeight64 > (std::numeric_limits<int>::max)())
-		{
-			return false;
-		}
-
-		const int resizedWidth = static_cast<int>(resizedWidth64);
-		const int resizedHeight = static_cast<int>(resizedHeight64);
-
-		cv::Mat cvResized;
-		
-		cv::resize(cvSource, cvResized, cv::Size(resizedWidth, resizedHeight), 0.0, 0.0, cv::INTER_LINEAR);
-
-		// Python CenterCrop 의 Round(diff / 2) 와 같은 짝수 반올림.
-		const auto centerOffset = [](int difference) noexcept
-			{
-				const int half = difference / 2;
-				return half + ((difference % 2 != 0 && half % 2 != 0) ? 1 : 0);
-			};
-
-		const int left = centerOffset(resizedWidth - targetSize);
-		const int top = centerOffset(resizedHeight - targetSize);
-
-		const cv::Mat cvCropped = cvResized(cv::Rect(left, top, targetSize, targetSize));
-
-		const std::size_t planeSize = m_inputInfo.elementCount / 3;
-
-		float* const red = m_hostInput.data();
-		float* const green = red + planeSize;
-		float* const blue = green + planeSize;
-
-		constexpr float scale = 1.0f / 255.0f;
-
-		for (int y = 0; y < targetSize; ++y)
-		{
-			const cv::Vec3b* row = cvCropped.ptr<cv::Vec3b>(y);
-
-			for (int x = 0; x < targetSize; ++x)
-			{
-				const std::size_t index = static_cast<std::size_t>(y) * targetSize + x;
-
-				// OpenCV의 BGR을 모델의 RGB 순서로 바꾸면서
-				// uint8 -> float, HWC -> CHW, 0~255 -> 0~1 변환.
-				red[index] = row[x][2] * scale;
-				green[index] = row[x][1] * scale;
-				blue[index] = row[x][0] * scale;
-			}
-		}
-
-		return true;
-
-	}
-	catch (const std::exception& exception)
-	{
-		std::fprintf(
-			stderr,
-			"[VisionInference] Preprocess failed: %s\n",
-			exception.what());
-
-		return false;
-	}
-	catch (...)
-	{
-		std::fprintf(
-			stderr,
-			"[VisionInference] Preprocess failed: unknown exception.\n");
-
-		return false;
-	}
-}
-
 bool InferenceInstance::RunTensor() noexcept
 {
 	if (!IsOpen())
@@ -865,63 +760,6 @@ bool InferenceInstance::RunTensor() noexcept
 		Close();
 		return false;
 	}
-
-	return true;
-}
-
-bool InferenceInstance::Postprocess(VI_ClassificationResult& result) const noexcept
-{
-	result = { -1, 0.0f };
-
-	const auto& shape = m_outputInfo.shape;
-
-	// 현재는 이미지 한 장의 클래스별 점수 [1, C]만 지원한다.
-	if (shape.nbDims != 2 ||
-		shape.d[0] != 1 ||
-		shape.d[1] <= 0 ||
-		shape.d[1] > (std::numeric_limits<int32_t>::max)())
-	{
-		std::fprintf(
-			stderr,
-			"[VisionInference] Expected output shape [1, C].\n");
-
-		return false;
-	}
-
-	const std::size_t classCount = static_cast<std::size_t>(shape.d[1]);
-
-	if (m_hostOutput.size() != classCount)
-	{
-		return false;
-	}
-
-	std::size_t bestIndex = 0;
-	float bestScore = (std::numeric_limits<float>::lowest)();
-
-	for (std::size_t index = 0; index < classCount; ++index)
-	{
-		const float score = m_hostOutput[index];
-
-		if (!std::isfinite(score))
-		{
-			std::fprintf(
-				stderr,
-				"[VisionInference] Non-finite output at index %zu.\n",
-				index);
-
-			return false;
-		}
-
-
-		if (score > bestScore)
-		{
-			bestScore = score;
-			bestIndex = index;
-		}
-	}
-
-	result.classId = static_cast<int32_t>(bestIndex);
-	result.score = bestScore;
 
 	return true;
 }
