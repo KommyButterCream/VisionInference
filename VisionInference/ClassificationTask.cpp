@@ -1,5 +1,7 @@
 #include "ClassificationTask.h" // for ClassificationTask
 
+#include "ImageValidation.h"
+
 #include <opencv2/core.hpp> // for cv::Mat, cv::Rect, cv::Size, cv::Vec3b
 #include <opencv2/imgproc.hpp> // for cv::resize, cv::INTER_LINEAR
 
@@ -116,11 +118,7 @@ bool ClassificationTask::Preprocess(
 {
 	try
 	{
-		if (image.data == nullptr ||
-			image.width <= 0 ||
-			image.height <= 0 ||
-			image.pixelFormat != VI_PIXEL_FORMAT_BGR8 ||
-			image.strideBytes / 3 < static_cast<std::size_t>(image.width))
+		if (!IsValidImageView(image))
 		{
 			return false;
 		}

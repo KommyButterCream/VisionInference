@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="UserMacros">
+    <ViOpenCVRoot Condition="'$(ViOpenCVRoot)' == ''">C:\RYLYNN\Workspace\Libraries\opencv-5.1.0</ViOpenCVRoot>
+    <ViOpenCVVersion Condition="'$(ViOpenCVVersion)' == ''">510</ViOpenCVVersion>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Platform)' == 'x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ViOpenCVRoot)\build\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(ViOpenCVRoot)\build\x64\vc16\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies Condition="'$(Configuration)' == 'Debug'">opencv_world$(ViOpenCVVersion)d.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies Condition="'$(Configuration)' != 'Debug'">opencv_world$(ViOpenCVVersion).lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

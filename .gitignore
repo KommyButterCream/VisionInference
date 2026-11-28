@@ -54,3 +54,4 @@ venv/
 # Local test project
 /VisionInferenceTest/
 /VisionInference.local.sln
+/VisionInference/ImageValidation.h

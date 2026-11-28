@@ -1,4 +1,5 @@
 #include "InferenceInstance.h" // for InferenceInstance, TensorRTLogger
+#include "ImageValidation.h"
 
 #include <cuda_runtime_api.h> // for cudaGetDeviceCount, cudaSetDevice, cudaGetErrorString
 
@@ -9,6 +10,7 @@
 #include <exception>          // for std::exception
 #include <limits>			  // for std::numeric_limits
 #include <span> // for std::span
+#include <new> // for std::bad_alloc
 
 void TensorRTLogger::log(Severity severity, const char* message) noexcept
 {
@@ -31,7 +33,7 @@ InferenceInstance::~InferenceInstance() noexcept
 	Close();
 }
 
-bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32_t deviceId)
+InferenceStatus InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32_t deviceId) noexcept
 {
 	Close();
 
@@ -48,12 +50,12 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				"[VisionInference] cudaGetDeviceCount failed : %s\n",
 				cudaGetErrorString(cudaStatus));
 
-			return false;
+			return InferenceStatus::ResourcePreparationFailed;
 		}
 
 		if (deviceId < 0 || deviceId >= deviceCount)
 		{
-			return false;
+			return InferenceStatus::InvalidArgument;
 		}
 
 		// 1. 사용할 GPU 선택
@@ -65,7 +67,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				"[VisionInference] cudaSetDevice failed : %s\n",
 				cudaGetErrorString(cudaStatus));
 
-			return false;
+			return InferenceStatus::ResourcePreparationFailed;
 		}
 
 		// 2. 엔진 파일 열기
@@ -77,7 +79,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				stderr,
 				"[VisionInference] Failed to open engine file.\n");
 
-			return false;
+			return InferenceStatus::FileReadFailed;
 		}
 
 		// 3. 파일 크기 확인
@@ -89,7 +91,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				stderr,
 				"[VisionInference] Engine file is empty or size query failed.\n");
 
-			return false;
+			return InferenceStatus::FileReadFailed;
 		}
 
 		std::vector<char> engineData(static_cast<std::size_t>(fileSize));
@@ -103,7 +105,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				stderr,
 				"[VisionInference] Failed to read engine file.\n");
 
-			return false;
+			return InferenceStatus::FileReadFailed;
 		}
 
 		m_deviceId = deviceId;
@@ -118,7 +120,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				"[VisionInference] Failed to create TensorRT runtime.\n");
 
 			Close();
-			return false;
+			return InferenceStatus::ResourcePreparationFailed;
 		}
 
 		// 6. 엔진 역직렬화
@@ -131,7 +133,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				"[VisionInference] Failed to deserialize TensorRT engine.\n");
 
 			Close();
-			return false;
+			return InferenceStatus::ModelOpenFailed;
 		}
 
 		PrintModelInfo();
@@ -146,7 +148,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				"[VisionInference] Failed to create execution context.\n");
 
 			Close();
-			return false;
+			return InferenceStatus::ResourcePreparationFailed;
 		}
 
 		if (!ReadModelInfo())
@@ -156,7 +158,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				"[VisionInference] Failed to read supported model information.\n");
 
 			Close();
-			return false;
+			return InferenceStatus::UnsupportedModel;
 		}
 
 		if (!m_classificationTask.Configure(m_inputInfo, m_outputInfo))
@@ -166,7 +168,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				"[VisionInference] Unsupported classification model contract.\n");
 
 			Close();
-			return false;
+			return InferenceStatus::UnsupportedModel;
 		}
 
 		if (!AllocateBuffers())
@@ -176,7 +178,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				"[VisionInference] Failed to allocate buffers.\n");
 
 			Close();
-			return false;
+			return InferenceStatus::ResourcePreparationFailed;
 		}
 
 		if (!PrepareExecution())
@@ -186,10 +188,20 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 				"[VisionInference] Failed to prepare execution.\n");
 
 			Close();
-			return false;
+			return InferenceStatus::ResourcePreparationFailed;
 		}
 
-		return true;
+		return InferenceStatus::Ok;
+	}
+	catch (const std::bad_alloc& exception)
+	{
+		std::fprintf(
+			stderr,
+			"[VisionInference] Open allocation failed: %s\n",
+			exception.what());
+
+		Close();
+		return InferenceStatus::OutOfMemory;
 	}
 	catch (const std::exception& exception)
 	{
@@ -199,7 +211,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 			exception.what());
 
 		Close();
-		return false;
+		return InferenceStatus::InternalError;
 	}
 	catch (...)
 	{
@@ -208,7 +220,7 @@ bool InferenceInstance::Open(const std::filesystem::path& enginePath, std::int32
 			"[VisionInference] Open failed with an unknown exception.\n");
 
 		Close();
-		return false;
+		return InferenceStatus::InternalError;
 	}
 }
 
@@ -258,30 +270,40 @@ bool InferenceInstance::IsOpen() const noexcept
 		m_stream.Get() != nullptr;
 }
 
-bool InferenceInstance::Infer(const VI_ImageView& image, VI_ClassificationResult& result) noexcept
+InferenceStatus InferenceInstance::Infer(const VI_ImageView& image, VI_ClassificationResult& result) noexcept
 {
 	result = { -1, 0.0f };
 
+	if (!IsValidImageView(image))
+	{
+		return InferenceStatus::InvalidArgument;
+	}
+
 	if (!IsOpen())
 	{
-		return false;
+		return InferenceStatus::ModelNotOpen;
 	}
 
 	const std::span<float> inputTensor(m_hostInput.data(), m_hostInput.size());
 
 	if (!m_classificationTask.Preprocess(image, inputTensor))
 	{
-		return false;
+		return InferenceStatus::PreprocessFailed;
 	}
 
 	if (!RunTensor())
 	{
-		return false;
+		return InferenceStatus::ExecutionFailed;
 	}
 
 	const std::span<const float> outputTensor(m_hostOutput.data(), m_hostOutput.size());
 
-	return m_classificationTask.Postprocess(outputTensor, result);
+	if (!m_classificationTask.Postprocess(outputTensor, result))
+	{
+		return InferenceStatus::PostprocessFailed;
+	}
+
+	return InferenceStatus::Ok;
 }
 
 void InferenceInstance::PrintModelInfo() const noexcept

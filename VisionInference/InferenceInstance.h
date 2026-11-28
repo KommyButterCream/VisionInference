@@ -31,11 +31,11 @@ public:
 	InferenceInstance(InferenceInstance&&) = delete;
 	InferenceInstance& operator=(InferenceInstance&&) = delete;
 
-	bool Open(const std::filesystem::path& enginePath, std::int32_t deviceId = 0);
+	InferenceStatus Open(const std::filesystem::path& enginePath, std::int32_t deviceId = 0) noexcept;
 	void Close() noexcept;
 	bool IsOpen() const noexcept;
 
-	bool Infer(const VI_ImageView& image, VI_ClassificationResult& result) noexcept;
+	InferenceStatus Infer(const VI_ImageView& image, VI_ClassificationResult& result) noexcept;
 
 private:
 	void PrintModelInfo() const noexcept;

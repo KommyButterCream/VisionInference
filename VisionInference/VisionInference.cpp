@@ -1,9 +1,57 @@
 #include "VisionInference.h"  // for public C API declarations, VI_Status
 
 #include "InferenceInstance.h" // for InferenceInstance
+#include "InferenceTypes.h"
 
 #include <new>        // for std::nothrow, std::bad_alloc
 #include <filesystem> // for std::filesystem::path
+
+namespace
+{
+	VI_Status ToPublicStatus(InferenceStatus status) noexcept
+	{
+		switch (status)
+		{
+		case InferenceStatus::Ok:
+			return VI_STATUS_OK;
+
+		case InferenceStatus::InvalidArgument:
+			return VI_STATUS_INVALID_ARGUMENT;
+
+		case InferenceStatus::ModelNotOpen:
+			return VI_STATUS_MODEL_NOT_OPEN;
+
+		case InferenceStatus::PreprocessFailed:
+			return VI_STATUS_PREPROCESS_FAILED;
+
+		case InferenceStatus::ExecutionFailed:
+			return VI_STATUS_INFERENCE_FAILED;
+
+		case InferenceStatus::PostprocessFailed:
+			return VI_STATUS_POSTPROCESS_FAILED;
+
+		case InferenceStatus::FileReadFailed:
+			return VI_STATUS_FILE_READ_FAILED;
+
+		case InferenceStatus::UnsupportedModel:
+			return VI_STATUS_UNSUPPORTED_MODEL;
+
+		case InferenceStatus::ResourcePreparationFailed:
+			return VI_STATUS_RESOURCE_PREPARATION_FAILED;
+
+		case InferenceStatus::ModelOpenFailed:
+			return VI_STATUS_MODEL_OPEN_FAILED;
+
+		case InferenceStatus::OutOfMemory:
+			return VI_STATUS_OUT_OF_MEMORY;
+
+		case InferenceStatus::InternalError:
+			return VI_STATUS_INTERNAL_ERROR;
+		}
+
+		return VI_STATUS_INTERNAL_ERROR;
+	}
+}
 
 // 실제 정의는 DLL 내부에서만 공개
 struct VI_Context final
@@ -54,14 +102,9 @@ VI_Status VI_CALL VI_OpenModel(VI_Handle handle, const wchar_t* enginePath, int3
 	{
 		const std::filesystem::path path(enginePath);
 
-		const bool opened = handle->instance.Open(path, deviceId);
+		const InferenceStatus status = handle->instance.Open(path, deviceId);
 
-		if (!opened)
-		{
-			return VI_STATUS_MODEL_OPEN_FAILED;
-		}
-
-		return VI_STATUS_OK;
+		return ToPublicStatus(status);
 	}
 	catch (const std::bad_alloc&)
 	{
@@ -98,25 +141,7 @@ VI_Status VI_CALL VI_InferClassification(VI_Handle handle, const VI_ImageView* i
 		return VI_STATUS_INVALID_ARGUMENT;
 	}
 
-	if (image->data == nullptr || image->width <= 0 || image->height <= 0)
-	{
-		return VI_STATUS_INVALID_ARGUMENT;
-	}
+	const InferenceStatus status = handle->instance.Infer(*image, *outResult);
 
-	if (image->pixelFormat != VI_PIXEL_FORMAT_BGR8)
-	{
-		return VI_STATUS_INVALID_ARGUMENT;
-	}
-
-	if (image->strideBytes / 3 < static_cast<size_t>(image->width))
-	{
-		return VI_STATUS_INVALID_ARGUMENT;
-	}
-
-	if (!handle->instance.IsOpen())
-	{
-		return VI_STATUS_MODEL_NOT_OPEN;
-	}
-
-	return handle->instance.Infer(*image, *outResult) ? VI_STATUS_OK : VI_STATUS_INFERENCE_FAILED;
+	return ToPublicStatus(status);
 }

@@ -29,7 +29,12 @@ enum ENUM_VI_STATUS
     VI_STATUS_MODEL_OPEN_FAILED = 3,
     VI_STATUS_INTERNAL_ERROR = 4,
     VI_STATUS_MODEL_NOT_OPEN = 5,
-    VI_STATUS_INFERENCE_FAILED = 6
+    VI_STATUS_INFERENCE_FAILED = 6,
+    VI_STATUS_PREPROCESS_FAILED = 7,
+    VI_STATUS_POSTPROCESS_FAILED = 8,
+    VI_STATUS_FILE_READ_FAILED = 9,
+    VI_STATUS_UNSUPPORTED_MODEL = 10,
+    VI_STATUS_RESOURCE_PREPARATION_FAILED = 11
 };
 
 enum ENUM_VI_PIXEL_FORMAT
@@ -40,19 +45,19 @@ enum ENUM_VI_PIXEL_FORMAT
 // 이미지 메모리를 소유하지 않고, 외부 이미지의 정보를 전달한다.
 typedef struct VI_ImageView
 {
-    const uint8_t* data = nullptr;
+    const uint8_t* data;
 
-    int32_t width = 0;
-    int32_t height = 0;
+    int32_t width;
+    int32_t height;
 
-    size_t strideBytes = 0ULL;
-    int32_t pixelFormat = 0;
+    size_t strideBytes;
+    int32_t pixelFormat;
 } VI_ImageView;
 
 typedef struct VI_ClassificationResult
 {
-    int32_t classId = -1;
-    float score = 0.0f; 
+    int32_t classId;
+    float score;
 } VI_ClassificationResult;
 
 VI_API VI_Status VI_CALL VI_Create(VI_Handle* out_handle) VI_NOEXCEPT;

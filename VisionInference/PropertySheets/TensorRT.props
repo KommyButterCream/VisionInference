@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="UserMacros">
+    <ViTensorRTRoot Condition="'$(ViTensorRTRoot)' == ''">C:\RYLYNN\Workspace\Libraries\TensorRT-11.5.0.63</ViTensorRTRoot>
+    <ViTensorRTMajorVersion Condition="'$(ViTensorRTMajorVersion)' == ''">11</ViTensorRTMajorVersion>
+  </PropertyGroup>
+  <ItemDefinitionGroup Condition="'$(Platform)' == 'x64'">
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(ViTensorRTRoot)\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+    <Link>
+      <AdditionalLibraryDirectories>$(ViTensorRTRoot)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>nvinfer_$(ViTensorRTMajorVersion).lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

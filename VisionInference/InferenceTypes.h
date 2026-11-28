@@ -15,3 +15,19 @@ struct TensorInfo
 	std::size_t elementCount = 0;	// 전체 원소 개수
 	std::size_t byteSize = 0;		// 메모리 할당, 복사에 필요한 바이트 단위 수량
 };
+
+enum class InferenceStatus
+{
+    Ok,
+    InvalidArgument,
+    ModelNotOpen,
+    PreprocessFailed,
+    ExecutionFailed,
+    PostprocessFailed,
+    FileReadFailed,
+    UnsupportedModel,
+    ResourcePreparationFailed,
+    ModelOpenFailed,
+    OutOfMemory,
+    InternalError
+};
