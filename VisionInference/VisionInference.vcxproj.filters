@@ -23,6 +23,9 @@
     <ClCompile Include="Buffers.cpp">
       <Filter>소스 파일</Filter>
     </ClCompile>
+    <ClCompile Include="ExecutionSlot.cpp">
+      <Filter>소스 파일</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="VisionInference.h">
@@ -41,6 +44,21 @@
       <Filter>헤더 파일</Filter>
     </ClInclude>
     <ClInclude Include="ImageValidation.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="TensorTypes.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="InferenceInterface.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="InferenceTaskTypes.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="InferenceResult.h">
+      <Filter>헤더 파일</Filter>
+    </ClInclude>
+    <ClInclude Include="ExecutionSlot.h">
       <Filter>헤더 파일</Filter>
     </ClInclude>
   </ItemGroup>

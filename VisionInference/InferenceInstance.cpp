@@ -1,5 +1,7 @@
 #include "InferenceInstance.h" // for InferenceInstance, TensorRTLogger
-#include "ImageValidation.h"
+
+#include "ImageValidation.h" // for IsValidImageView
+#include "InferenceResult.h" // for ResultBuilder
 
 #include <cuda_runtime_api.h> // for cudaGetDeviceCount, cudaSetDevice, cudaGetErrorString
 
@@ -9,7 +11,6 @@
 #include <cstddef>            // for std::size_t
 #include <exception>          // for std::exception
 #include <limits>			  // for std::numeric_limits
-#include <span> // for std::span
 #include <new> // for std::bad_alloc
 
 void TensorRTLogger::log(Severity severity, const char* message) noexcept
@@ -139,9 +140,9 @@ InferenceStatus InferenceInstance::Open(const std::filesystem::path& enginePath,
 		PrintModelInfo();
 
 		// 7. 추론 실행 Context 생성
-		m_executionContext.reset(m_engine->createExecutionContext());
+		m_slot.context.reset(m_engine->createExecutionContext());
 
-		if (!m_executionContext)
+		if (!m_slot.context)
 		{
 			std::fprintf(
 				stderr,
@@ -161,14 +162,19 @@ InferenceStatus InferenceInstance::Open(const std::filesystem::path& enginePath,
 			return InferenceStatus::UnsupportedModel;
 		}
 
-		if (!m_classificationTask.Configure(m_inputInfo, m_outputInfo))
-		{
-			std::fprintf(
-				stderr,
-				"[VisionInference] Unsupported classification model contract.\n");
+		// 모델 정보와 고정 옵션은 Open 단계에서 한 번 전달한다.
+		TensorCatalog tensors;
+		tensors.inputs.push_back(m_inputInfo);
+		tensors.outputs.push_back(m_outputInfo);
 
+		const ModelOptions options{};
+
+		const InferenceStatus taskStatus = m_classificationTask.Configure(tensors, options);
+
+		if (taskStatus != InferenceStatus::Ok)
+		{
 			Close();
-			return InferenceStatus::UnsupportedModel;
+			return taskStatus;
 		}
 
 		if (!AllocateBuffers())
@@ -235,7 +241,7 @@ void InferenceInstance::Close() noexcept
 	}
 
 	// Context와 버퍼를 해제하기 전에 실행 완료를 기다린다.
-	if (!m_stream.Synchronize())
+	if (!m_slot.stream.Synchronize())
 	{
 		std::fprintf(
 			stderr,
@@ -243,16 +249,20 @@ void InferenceInstance::Close() noexcept
 			"attempting resource cleanup.\n");
 	}
 
-	m_executionContext.reset();
+	m_slot.context.reset();
 
 	ReleaseBuffers();
 
-	m_stream.Reset();
+	m_slot.stream.Reset();
 
 	m_engine.reset();
 	m_runtime.reset();
 
 	m_classificationTask.Reset();
+
+	// 빌린 이미지 주소와 이전 실행의 변환 정보도 비운다.
+	m_slot.image = {};
+	m_slot.transform = {};
 
 	m_inputInfo = {};
 	m_outputInfo = {};
@@ -264,10 +274,10 @@ bool InferenceInstance::IsOpen() const noexcept
 {
 	return m_deviceId >= 0 &&
 		m_engine != nullptr &&
-		m_executionContext != nullptr &&
-		m_deviceInput.Data() != nullptr &&
-		m_deviceOutput.Data() != nullptr &&
-		m_stream.Get() != nullptr;
+		m_slot.context != nullptr &&
+		m_slot.input.DeviceData() != nullptr &&
+		m_slot.output.DeviceData() != nullptr &&
+		m_slot.stream.Get() != nullptr;
 }
 
 InferenceStatus InferenceInstance::Infer(const VI_ImageView& image, VI_ClassificationResult& result) noexcept
@@ -284,26 +294,60 @@ InferenceStatus InferenceInstance::Infer(const VI_ImageView& image, VI_Classific
 		return InferenceStatus::ModelNotOpen;
 	}
 
-	const std::span<float> inputTensor(m_hostInput.data(), m_hostInput.size());
-
-	if (!m_classificationTask.Preprocess(image, inputTensor))
+	try
 	{
-		return InferenceStatus::PreprocessFailed;
-	}
+		// 현재 동기 호출 동안만 caller 의 이미지를 빌려 사용
+		m_slot.image = image;
 
-	if (!RunTensor())
+		const InferenceStatus preprocessStatus = m_classificationTask.Preprocess(m_slot);
+
+		// 현재 CPU 전처리는 이미 원본 읽기를 마쳤다.
+		m_slot.image = {};
+
+		if (preprocessStatus != InferenceStatus::Ok)
+		{
+			return preprocessStatus;
+		}
+
+		if (!RunTensor())
+		{
+			return InferenceStatus::ExecutionFailed;
+		}
+
+		// RunTensor 가 GPU 작업과 D2H 완료까지 기다린 뒤 반환한다.
+		ResultBuilder builder;
+
+		const InferenceStatus resultStatus = m_classificationTask.BuildResult(m_slot, builder);
+
+		if (resultStatus != InferenceStatus::Ok)
+		{
+			return resultStatus;
+		}
+
+		const auto results = builder.Classification();
+
+		if (results.size() != 1 || results[0].scores.size() != 1)
+		{
+			return InferenceStatus::PostprocessFailed;
+		}
+
+		// 공개 ResultHandle 구현 전까지 기존 Top-1 API로 연결한다.
+		const auto& score = results[0].scores[0];
+		result.classId = score.classId;
+		result.score = score.score;
+
+		return InferenceStatus::Ok;
+	}
+	catch (const std::bad_alloc&)
 	{
-		return InferenceStatus::ExecutionFailed;
+		Close();
+		return InferenceStatus::OutOfMemory;
 	}
-
-	const std::span<const float> outputTensor(m_hostOutput.data(), m_hostOutput.size());
-
-	if (!m_classificationTask.Postprocess(outputTensor, result))
+	catch (...)
 	{
-		return InferenceStatus::PostprocessFailed;
+		Close();
+		return InferenceStatus::InternalError;
 	}
-
-	return InferenceStatus::Ok;
 }
 
 void InferenceInstance::PrintModelInfo() const noexcept
@@ -545,7 +589,7 @@ bool InferenceInstance::ReadModelInfo()
 
 bool InferenceInstance::AllocateBuffers()
 {
-	if (m_deviceInput.Data() != nullptr || m_deviceOutput.Data() != nullptr)
+	if (m_slot.input.DeviceData() != nullptr || m_slot.output.DeviceData() != nullptr)
 	{
 		return false;
 	}
@@ -555,16 +599,15 @@ bool InferenceInstance::AllocateBuffers()
 		return false;
 	}
 
-	m_hostInput.assign(m_inputInfo.elementCount, 0.0f);
-	m_hostOutput.assign(m_outputInfo.elementCount, 0.0f);
-
-	if (!m_deviceInput.Allocate(m_inputInfo.byteSize, m_deviceId))
+	// 각 TensorBuffer가 CPU 배열과 GPU 버퍼를 함께 준비
+	if (!m_slot.input.Allocate(m_inputInfo, m_deviceId))
 	{
 		return false;
 	}
 
-	if (!m_deviceOutput.Allocate(m_outputInfo.byteSize, m_deviceId))
+	if (!m_slot.output.Allocate(m_outputInfo, m_deviceId))
 	{
+		m_slot.input.Reset();
 		return false;
 	}
 
@@ -573,30 +616,28 @@ bool InferenceInstance::AllocateBuffers()
 
 void InferenceInstance::ReleaseBuffers() noexcept
 {
-	m_deviceOutput.Reset();
-	m_deviceInput.Reset();
-
-	std::vector<float>().swap(m_hostOutput);
-	std::vector<float>().swap(m_hostInput);
+	// Close에서 stream 완료를 기다린 뒤 이 함수를 호출한다.
+	m_slot.output.Reset();
+	m_slot.input.Reset();
 }
 
 bool InferenceInstance::PrepareExecution() noexcept
 {
-	if (!m_executionContext ||
-		m_deviceInput.Data() == nullptr ||
-		m_deviceOutput.Data() == nullptr ||
-		m_stream.Get() != nullptr)
+	if (!m_slot.context ||
+		m_slot.input.DeviceData() == nullptr ||
+		m_slot.output.DeviceData() == nullptr ||
+		m_slot.stream.Get() != nullptr)
 	{
 		return false;
 	}
 
-	if (!m_stream.Create(m_deviceId))
+	if (!m_slot.stream.Create(m_deviceId))
 	{
 		return false;
 	}
 
 	// 2. 입력 tensor 에 GPU 입력 버퍼 주소 등록
-	if (!m_executionContext->setTensorAddress(m_inputInfo.name.c_str(), m_deviceInput.Data()))
+	if (!m_slot.context->setTensorAddress(m_inputInfo.name.c_str(), m_slot.input.DeviceData()))
 	{
 		std::fprintf(
 			stderr,
@@ -606,7 +647,7 @@ bool InferenceInstance::PrepareExecution() noexcept
 	}
 
 	// 3. 출력 tensor 에 GPU 출력 버퍼 주소 등록
-	if (!m_executionContext->setTensorAddress(m_outputInfo.name.c_str(), m_deviceOutput.Data()))
+	if (!m_slot.context->setTensorAddress(m_outputInfo.name.c_str(), m_slot.output.DeviceData()))
 	{
 		std::fprintf(
 			stderr,
@@ -636,11 +677,11 @@ bool InferenceInstance::RunTensor() noexcept
 
 	// 1. CPU 입력 -> GPU 입력
 	cudaError_t status = cudaMemcpyAsync(
-		m_deviceInput.Data(),
-		m_hostInput.data(),
-		m_inputInfo.byteSize,
+		m_slot.input.DeviceData(),
+		m_slot.input.Host().data(),
+		m_slot.input.SizeBytes(),
 		cudaMemcpyHostToDevice,
-		m_stream.Get());
+		m_slot.stream.Get());
 
 	if (status != cudaSuccess)
 	{
@@ -654,7 +695,7 @@ bool InferenceInstance::RunTensor() noexcept
 	}
 
 	// 2. 추론 실행 요청
-	if (!m_executionContext->enqueueV3(m_stream.Get()))
+	if (!m_slot.context->enqueueV3(m_slot.stream.Get()))
 	{
 		std::fprintf(
 			stderr,
@@ -664,26 +705,17 @@ bool InferenceInstance::RunTensor() noexcept
 		return false;
 	}
 
-	// 3. GPU 출력 -> CPU 출력
-	status = cudaMemcpyAsync(
-		m_hostOutput.data(),
-		m_deviceOutput.Data(),
-		m_outputInfo.byteSize,
-		cudaMemcpyDeviceToHost,
-		m_stream.Get());
+	// 3. Task가 CPU/GPU 후처리 방식에 맞는 출력 전송을 제출한다.
+	const InferenceStatus postStatus = m_classificationTask.EnqueuePostprocess(m_slot);
 
-	if (status != cudaSuccess)
+	if (postStatus != InferenceStatus::Ok)
 	{
-		std::fprintf(
-			stderr,
-			"[VisionInference] Output copy failed: %s\n",
-			cudaGetErrorString(status));
-
+		// 이미 제출된 GPU 작업이 있을 수 있으므로 Close에서 대기 후 정리한다.
 		Close();
 		return false;
 	}
 
-	if (!m_stream.Synchronize())
+	if (!m_slot.stream.Synchronize())
 	{
 		Close();
 		return false;

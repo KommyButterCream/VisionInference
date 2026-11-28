@@ -1,7 +1,8 @@
-#include "Buffers.h"
+#include "Buffers.h" // for DeviceBuffer, CudaStream, TensorBuffer
 
 #include <cuda_runtime_api.h> // for CUDA allocation, stream, device and error APIs
 #include <cstdio> // for std::fprintf, stderr
+#include <limits> // for std::numeric_limits
 
 namespace
 {
@@ -135,4 +136,59 @@ void CudaStream::Reset() noexcept
 
 	m_stream = nullptr;
 	m_deviceId = -1;
+}
+
+bool TensorBuffer::Allocate(const TensorInfo& info, int deviceId)
+{
+	// 사용 중인 버퍼를 암묵적으로 교체하지 않는다.
+	if (m_info != nullptr || m_device.Data() != nullptr)
+	{
+		return false;
+	}
+
+	// 현재는 FP32 텐서 지원
+	if (deviceId < 0 ||
+		info.dataType != nvinfer1::DataType::kFLOAT ||
+		info.elementCount == 0)
+	{
+		return false;
+	}
+
+	constexpr std::size_t maxSize = (std::numeric_limits<std::size_t>::max)();
+
+	if (info.elementCount > maxSize / sizeof(float))
+	{
+		return false;
+	}
+
+	const std::size_t byteSize = info.elementCount * sizeof(float);
+
+	if (info.byteSize != byteSize)
+	{
+		return false;
+	}
+
+	// CPU 메모리 할당이 실패하면 예외 발생
+	// 현재 Open 의 예외 처리에서 OutOfMemory 로 변환
+	std::vector<float> host(info.elementCount, 0.0f);
+
+	if (!m_device.Allocate(byteSize, deviceId))
+	{
+		return false;
+	}
+
+	// 두 메모리의 준비가 끝난 뒤에 소유권과 모델 참조를 확정한다.
+	m_host.swap(host);
+	m_info = &info;
+
+	return true;
+}
+
+void TensorBuffer::Reset() noexcept
+{
+	m_device.Reset();
+
+	std::vector<float>().swap(m_host);
+
+	m_info = nullptr;
 }

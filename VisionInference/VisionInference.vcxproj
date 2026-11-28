@@ -86,15 +86,21 @@
   <ItemGroup>
     <ClCompile Include="Buffers.cpp" />
     <ClCompile Include="ClassificationTask.cpp" />
+    <ClCompile Include="ExecutionSlot.cpp" />
     <ClCompile Include="InferenceInstance.cpp" />
     <ClCompile Include="VisionInference.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Buffers.h" />
     <ClInclude Include="ClassificationTask.h" />
+    <ClInclude Include="ExecutionSlot.h" />
     <ClInclude Include="ImageValidation.h" />
     <ClInclude Include="InferenceInstance.h" />
+    <ClInclude Include="InferenceInterface.h" />
+    <ClInclude Include="InferenceResult.h" />
+    <ClInclude Include="InferenceTaskTypes.h" />
     <ClInclude Include="InferenceTypes.h" />
+    <ClInclude Include="TensorTypes.h" />
     <ClInclude Include="VisionInference.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
